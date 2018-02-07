@@ -1,0 +1,210 @@
+#include "mbed.h"
+#include "BLE.h"
+#include "UARTService.h"
+#include "nrf_temp.h"
+#include "GattCharacteristicWriteCBParams.h"
+
+#define MAX_REPLY_LEN           (UARTService::BLE_UART_SERVICE_MAX_DATA_LEN)
+#define SENSOR_READ_INTERVAL_S  (0.5F) 
+#define ADV_INTERVAL_MS         (1000UL)
+#define UART_BAUD_RATE          (9600UL)
+#define DEVICE_NAME             ("dvlx_kaykay") // This can be read AFTER connecting to the device.
+#define SHORT_NAME              ("KAYKAY")    // Keep this short: max 8 chars if a 128bit UUID is also advertised.
+#define DEBUG(...)              { pc.printf(__VA_ARGS__); }
+#define TXRX_BUF_LEN                     20
+
+BLE         ble;
+Serial      pc(P0_3, P0_4);  // TX pin, RX pin
+DigitalOut  m_cmd_led(P0_21);
+DigitalOut  m_error_led(LED2);
+AnalogIn    m_analog_in(P0_1);
+uint16_t    m_analog_in_value;
+UARTService *m_uart_service_ptr;
+PwmOut      ESCpin(P0_21);
+float       Dcycle=0.04f;
+
+static const uint8_t uart_base_uuid[] = {0x71, 0x3D, 0, 0, 0x50, 0x3E, 0x4C, 0x75, 0xBA, 0x94, 0x31, 0x48, 0xF1, 0x8D, 0x94, 0x1E};
+static const uint8_t uart_tx_uuid[]   = {0x71, 0x3D, 0, 3, 0x50, 0x3E, 0x4C, 0x75, 0xBA, 0x94, 0x31, 0x48, 0xF1, 0x8D, 0x94, 0x1E};
+static const uint8_t uart_rx_uuid[]   = {0x71, 0x3D, 0, 2, 0x50, 0x3E, 0x4C, 0x75, 0xBA, 0x94, 0x31, 0x48, 0xF1, 0x8D, 0x94, 0x1E};
+static const uint8_t uart_base_uuid_rev[] = {0x1E, 0x94, 0x8D, 0xF1, 0x48, 0x31, 0x94, 0xBA, 0x75, 0x4C, 0x3E, 0x50, 0, 0, 0x3D, 0x71};
+
+
+uint8_t txPayload[TXRX_BUF_LEN] = {0,};
+uint8_t rxPayload[TXRX_BUF_LEN] = {0,};
+
+static uint8_t rx_buf[TXRX_BUF_LEN];
+static uint8_t rx_len=0;
+
+GattCharacteristic  txCharacteristic (uart_tx_uuid, txPayload, 1, TXRX_BUF_LEN, GattCharacteristic::BLE_GATT_CHAR_PROPERTIES_WRITE | GattCharacteristic::BLE_GATT_CHAR_PROPERTIES_WRITE_WITHOUT_RESPONSE);
+                                      
+GattCharacteristic  rxCharacteristic (uart_rx_uuid, rxPayload, 1, TXRX_BUF_LEN, GattCharacteristic::BLE_GATT_CHAR_PROPERTIES_NOTIFY);
+
+GattCharacteristic *uartChars[] = {&txCharacteristic, &rxCharacteristic};
+
+GattService         uartService(uart_base_uuid, uartChars, sizeof(uartChars) / sizeof(GattCharacteristic *));
+/**
+ * This callback is used whenever a disconnection occurs.
+ */
+void disconnectionCallback(const Gap::DisconnectionCallbackParams_t *params)
+{
+    switch (params->reason) {
+    case Gap::REMOTE_USER_TERMINATED_CONNECTION:
+        DEBUG("Disconnected (REMOTE_USER_TERMINATED_CONNECTION)\n\r");
+        break;
+    case Gap::LOCAL_HOST_TERMINATED_CONNECTION:
+        DEBUG("Disconnected (LOCAL_HOST_TERMINATED_CONNECTION)\n\r");
+        break;
+    case Gap::CONN_INTERVAL_UNACCEPTABLE:
+        DEBUG("Disconnected (CONN_INTERVAL_UNACCEPTABLE)\n\r");
+        break;
+    }
+
+    DEBUG("Restarting the advertising process\n\r");
+    ble.startAdvertising();
+}
+
+
+/**
+ * This callback is used whenever the host writes data to one of our GATT characteristics.
+ */
+void dataWrittenCallback(const GattWriteCallbackParams *Handler)
+{
+    uint8_t buf[TXRX_BUF_LEN];
+    uint16_t bytesRead, index;
+    pc.printf("%d yukarisi",txPayload[0]);
+    //if (Handler->handle == txCharacteristic.getValueAttribute().getHandle()) 
+    {
+    
+        ble.readCharacteristicValue(txCharacteristic.getValueAttribute().getHandle(), buf, &bytesRead);
+        memset(txPayload, 0, TXRX_BUF_LEN);
+        memcpy(txPayload, buf, TXRX_BUF_LEN); 
+        pc.printf("%d",buf[0]);     
+        switch (txPayload[0]) {
+            case 'u':
+                Dcycle+=0.01f;
+                //len = snprintf((char*) buf, MAX_REPLY_LEN, "%.2f",Dcycle);
+                //Dcycle=0.00f;
+                break;
+            case 'd':
+                Dcycle-=0.01f;
+                //len = snprintf((char*) buf, MAX_REPLY_LEN, "%.2f",Dcycle);
+                //Dcycle-=0.01f;
+                break;
+            case 's':
+                Dcycle=0.00f;
+                //len = snprintf((char*) buf, MAX_REPLY_LEN, "Stopped");
+                break;
+            case 'a':
+                Dcycle=0.04f;
+                //len = snprintf((char*) buf, MAX_REPLY_LEN, "Started");
+                break;
+            default:
+                bytesRead = snprintf((char*) buf, MAX_REPLY_LEN, "ERROR: Wronginput");
+                break;
+            }
+            ESCpin.write(Dcycle);
+           
+         
+        /*pc.printf("WriteHandler \r\n");
+        pc.printf("Length: ");
+        pc.putc(bytesRead);
+        pc.printf("\r\n");
+        pc.printf("Data: ");
+        for(index=0; index<bytesRead; index++)
+        {
+            pc.putc(txPayload[index]);        
+        }
+        pc.printf("\r\n");*/
+    }
+}
+
+
+/**
+ * This callback is used whenever a write to a GATT characteristic causes data to be sent to the host.
+ */
+void dataSentCallback(unsigned count)
+{
+    // NOTE: The count always seems to be 1 regardless of data.
+    DEBUG("%d bytes sent to host\n\r", count);
+}
+
+
+/**
+ * This callback is scheduled to be called periodically via a low-priority interrupt.
+ */
+
+void error(ble_error_t err, uint32_t line)
+{
+    m_error_led = 1;
+    DEBUG("Error %d on line number %d\n\r", err, line);
+}
+
+
+int main(void)
+{   
+    ESCpin.period(0.02f);
+    ESCpin.write(Dcycle);
+    ble_error_t err;
+    Ticker      ticker;
+    
+    pc.baud(UART_BAUD_RATE);
+
+    DEBUG("Initialising\n\r");
+
+    m_cmd_led      = 0;
+    m_error_led    = 0;
+    m_analog_in_value    = 0;
+
+   
+    //initialize pwm here
+    
+    ble.init();
+    ble.onDisconnection(disconnectionCallback);
+    ble.onDataWritten(dataWrittenCallback);
+    ble.onDataSent(dataSentCallback);
+
+    // Set the TX power in dBm units.
+    // Possible values (in decreasing order): 4, 0, -4, -8, -12, -16, -20.
+    err = ble.setTxPower(4);
+    if (BLE_ERROR_NONE != err) {
+        error(err, __LINE__);
+    }
+
+    // Setup advertising (GAP stuff).
+    err = ble.setDeviceName(DEVICE_NAME);
+    if (BLE_ERROR_NONE != err) {
+        error(err, __LINE__);
+    }
+
+    err = ble.accumulateAdvertisingPayload(GapAdvertisingData::BREDR_NOT_SUPPORTED);
+    if (BLE_ERROR_NONE != err) {
+        error(err, __LINE__);
+    }
+
+    ble.setAdvertisingType(GapAdvertisingParams::ADV_CONNECTABLE_UNDIRECTED);
+
+    err = ble.accumulateAdvertisingPayload(GapAdvertisingData::SHORTENED_LOCAL_NAME,
+                                                (const uint8_t *)SHORT_NAME,
+                                                (sizeof(SHORT_NAME) - 1));
+    if (BLE_ERROR_NONE != err) {
+        error(err, __LINE__);
+    }
+
+    err = ble.accumulateAdvertisingPayload(GapAdvertisingData::COMPLETE_LIST_128BIT_SERVICE_IDS,
+                                                (const uint8_t *)UARTServiceUUID_reversed,
+                                                sizeof(UARTServiceUUID_reversed));
+    if (BLE_ERROR_NONE != err) {
+        error(err, __LINE__);
+    }
+
+    ble.setAdvertisingInterval(GapAdvertisingParams::MSEC_TO_ADVERTISEMENT_DURATION_UNITS(ADV_INTERVAL_MS));
+    ble.startAdvertising();
+
+    // Create a UARTService object (GATT stuff).
+    UARTService uartService(ble);
+    m_uart_service_ptr = &uartService;
+
+    while (true) {
+        ble.waitForEvent();
+    }
+}
